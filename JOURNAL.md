@@ -46,3 +46,28 @@ endpoint returns 200 when the database is up.
 
 **Conclusion:** Good fit — clear cause, single-file change, easily tested, and
 independent of external services.
+
+## Week 8 — Reproduction & solution planning
+
+**Reproduction commit link:** https://github.com/Prasanna401623/pathreview/commit/8de9e4b8953a0f84b4fc16ad5cc89ecb7430803b
+
+**Reproduction summary:**
+I added a focused unit test (`tests/unit/test_health_check.py`) using an
+in-memory SQLite engine on the app's own SQLAlchemy 2.0.51, and confirmed that
+`execute("SELECT 1")` raises `ObjectNotExecutableError: Not an executable
+object: 'SELECT 1'`, while `execute(text("SELECT 1"))` returns `1`. End-to-end,
+hitting `GET /health` locally returned HTTP 503 with `"postgres": "unhealthy"`
+even though the Docker database container was healthy — exactly the false
+"database down" report described in the issue.
+
+**PLAN.md link:** https://github.com/Prasanna401623/pathreview/blob/fix/154-health-check-db-probe/PLAN.md
+
+**Walkthrough video (recommended):** Not recorded (optional / not graded).
+
+**Blockers or open questions:**
+- The same endpoint has a separate bug (#155, `settings.redis_host`), so my
+  Week 9 test must assert specifically on the `postgres` dependency rather than
+  the overall 200, to avoid coupling to someone else's issue.
+- `aiosqlite` isn't installed, so I still need to decide how to drive the async
+  probe in a test — a FastAPI dependency override with a stub session, or an
+  integration test against the local Postgres.
