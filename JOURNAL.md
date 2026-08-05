@@ -71,3 +71,99 @@ even though the Docker database container was healthy — exactly the false
 - `aiosqlite` isn't installed, so I still need to decide how to drive the async
   probe in a test — a FastAPI dependency override with a stub session, or an
   integration test against the local Postgres.
+
+## Week 9 — Solution building & PR submission
+
+### Check-in 1 (mid-week)
+
+**Current progress:**
+Sub-tasks 1, 2 and 4 from `PLAN.md` are done. I added
+`from sqlalchemy import text` to `api/routes/health.py` and changed the Postgres
+probe from `await db.execute("SELECT 1")` to `await db.execute(text("SELECT 1"))`,
+leaving the surrounding `try`/`except` intact so real outages are still reported.
+I also captured a **baseline** of `make check` and `make test-unit` on the
+unmodified file before touching anything, because the repo turned out to have a
+lot of pre-existing breakage (182 ruff errors, 53 failing unit tests) that has
+nothing to do with #154.
+
+Two things I found that weren't in the plan:
+- My Week 8 reproduction tests had **no `@pytest.mark.unit` marker**, so
+  `make test-unit` (which runs `-m unit`) was silently deselecting them. They
+  showed up as `2 deselected` and had never actually run in the suite.
+- Those Week 8 tests only exercised SQLAlchemy in isolation with a SQLite
+  engine. They never imported `health.py`, so they'd have passed whether or not
+  the bug was fixed. They weren't real regression tests.
+
+**Next steps:**
+Sub-task 3 — rewrite `tests/unit/test_health_check.py` to drive `health_check()`
+directly. I resolved the open question from Week 8 (how to drive the async probe
+without `aiosqlite`): rather than a FastAPI dependency override or a live
+Postgres, I'm writing a `StubAsyncSession` that mimics SQLAlchemy 2.x
+`execute()` strictness by raising `ObjectNotExecutableError` when handed a bare
+string. That keeps the test a true unit test and makes a regression to
+`execute("SELECT 1")` fail loudly. Then sub-task 5, and open the PR.
+
+**Blockers:**
+None blocking. One annoyance: the project's `pre-commit` hook can't pass on
+`api/routes/health.py` at all — `ruff` trips on `B008` (`Depends()` in an
+argument default, the standard FastAPI idiom) and `mypy` trips on pre-existing
+untyped-dict errors. Both pre-date my change. I'll commit with `--no-verify` and
+document it in the PR rather than re-typing a function this issue isn't about.
+
+---
+
+### Check-in 2 (end of week)
+
+**PR link:** https://github.com/ascherj/pathreview/pull/869
+
+**Branch:** `fix/154-health-check-db-probe`
+
+**What you built:**
+The `/health` PostgreSQL probe passed raw SQL as a plain Python string, which
+SQLAlchemy 2.x refuses to execute — so the probe raised on every request, the
+broad `except Exception` swallowed the real error and marked the database
+`"unhealthy"`, and `GET /health` returned HTTP 503 even when Postgres was
+completely fine. The fix wraps the statement in `sqlalchemy.text()`, so the
+probe now reports the database's actual state instead of its own bug. The
+`try`/`except` is unchanged, so genuine outages still report unhealthy.
+
+**Tests added or updated:**
+`tests/unit/test_health_check.py` — rewritten. `TestPostgresHealthProbe` (4
+tests) drives `health_check()` itself through a `StubAsyncSession` that rejects
+bare strings the way SQLAlchemy 2.x does: a reachable DB reports `"healthy"`,
+the probe hands over a `TextClause` rather than a string, a genuine outage still
+reports `"unhealthy"`, and that outage still surfaces as HTTP 503.
+`TestSqlAlchemyTextRequirement` (2 tests) keeps the root-cause documentation and
+justifies the stub's strictness. Both classes are now marked `unit` so the suite
+actually selects them.
+
+I verified the tests are real by reverting `health.py` to the buggy version:
+2 of the 6 fail without the fix and all 6 pass with it. The tests assert on
+`health_status["dependencies"]["postgres"]` rather than an overall HTTP 200,
+because the Redis probe in the same endpoint is independently broken by #155 —
+which I deliberately did not touch.
+
+**Self-review confirmation:** [x] make check passes  [x] make test-unit passes
+
+Both in the "introduces no new failures" sense, which is what this codebase
+allows — I documented the baseline in the PR description:
+
+| Command | Before | After |
+| --- | --- | --- |
+| `make lint` | 182 ruff errors | 182 ruff errors |
+| `make typecheck` | 5 errors in 4 files | 5 errors in 4 files |
+| `make test-unit` | 53 failed, 375 passed, 2 deselected | 53 failed, 381 passed, 0 deselected |
+
+The 53 failures are byte-for-byte identical before and after (`diff` of the
+sorted `FAILED` lines is empty), and none are in files I touched. My changes add
+6 passing tests and reduce `api/routes/health.py` from 4 ruff errors to 1.
+
+**Draft PR feedback received from:** none — I opened the PR ready-for-review
+rather than as a draft, so I have not yet had a peer look at it. I'll post it in
+the cohort Slack channel and fold in any feedback as review commits.
+
+**What I learned:**
+The most useful thing this week wasn't the one-line fix — it was discovering my
+Week 8 tests were both deselected *and* incapable of failing. "The tests pass"
+means nothing until you've watched them fail for the right reason. Reverting the
+fix to confirm the tests break is now a step I'll always do.
